@@ -1,0 +1,78 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# MSBuild
+[Ll]og/
+[Ll]ogs/
+
+# .NET
+*.exe
+*.dll
+*.pdb
+*.mdb
+*.lib
+*.exp
+*.cache
+*.ilk
+*.map
+*.tmp
+*.tmp_proj
+
+# Publish output
+[Pp]ublish/
+[Pp]ublish[Oo]utput/
+
+# Test results
+TestResults/
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
+# Crash dumps
+*.dmp
+*.mdmp
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# JetBrains Rider
+*.sln.iml
+
+# Roslyn analyzer results
+*.sarif
+
+# Local env / secrets
+*.env
+*.env.local
+appsettings.Local.json
+appsettings.Development.json
+secrets.json
