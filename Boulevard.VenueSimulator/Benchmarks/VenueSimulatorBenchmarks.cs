@@ -28,7 +28,7 @@ public class VenueSimulatorBenchmarks
         _naiveSimulator = new NaiveVenueMulticastSimulator(multicastIp, naivePort);
         
         _chaosEngine = new ChaosEngine(seed: 42);
-        _optimizedSimulator = new VenueMulticastSimulator(multicastIp, optPort, _chaosEngine);
+        _optimizedSimulator = new VenueMulticastSimulator(multicastIp, optPort, _chaosEngine, []);
 
         _reusableBuffer = new byte[64];
     }

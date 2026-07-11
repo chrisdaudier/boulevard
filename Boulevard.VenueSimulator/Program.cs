@@ -1,4 +1,5 @@
-﻿using BenchmarkDotNet.Running;
+﻿using System.Diagnostics;
+using BenchmarkDotNet.Running;
 
 internal class Program
 {
@@ -31,16 +32,36 @@ internal class Program
             cts.Cancel();            // Signals our background loops to stop
         };
 
+        Console.WriteLine("[BOOTSTRAP] Querying market close rates via free public API endpoints...");
+
+        // Dynamic loading occurs right here - exactly once on application startup
+        var loadStopwatch = Stopwatch.StartNew();
+        AssetBlueprint[] nasdaqTickerIds = await AssetBootstrapLoader.LoadNasdaqUniverseAsync();
+        loadStopwatch.Stop();
+        Console.WriteLine($"[BOOTSTRAP] Loaded {nasdaqTickerIds.Length} assets in {loadStopwatch.ElapsedMilliseconds:N0} ms.");
+
+        Console.WriteLine("\n[BOOTSTRAP] Target Allocation Data Maps Loaded:");
+        foreach (var asset in nasdaqTickerIds)
+        {
+            Console.WriteLine($" -> ID: {asset.AssetId} | {asset.Ticker} | Market Close: ${(asset.StartPriceInCents / 100.0):F2}");
+        }
+        Console.WriteLine();
+
         try
         {
             // 3. Initialize your decoupled components
             var chaosEngine = new ChaosEngine(seed: 42);
-            
+
             // Using standard local loopback multicast group and an enterprise data port
-            var simulator = new VenueMulticastSimulator(multicastIp: "239.255.0.1", port: 14000, chaosEngine);
+            var nasdaqExchange = new VenueMulticastSimulator(
+                multicastIp: "239.255.0.1", 
+                port: 14000, 
+                chaosEngine: chaosEngine, 
+                assets: nasdaqTickerIds);
 
             // 4. Fire up the background workers and the hot-path execution thread
-            simulator.Start();
+            nasdaqExchange.Start();
+            Console.WriteLine("[VENUE] Nasdaq Exchange initialized.");
 
             Console.WriteLine("[SYS] Boulevard Venue Simulator online.");
             Console.WriteLine("[SYS] Press CTRL+C to gracefully exit.\n");
