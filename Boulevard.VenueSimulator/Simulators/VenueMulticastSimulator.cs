@@ -227,3 +227,21 @@ public struct ItchAddOrderMessage
     public uint Shares;            
     public uint PriceInCents;      
 }
+
+public enum ItchMessageType : byte
+{
+    Timestamp           = (byte)'T',
+    SystemEvent         = (byte)'S',
+    StockDirectory      = (byte)'R',
+    TradingAction       = (byte)'H',
+    AddOrder            = (byte)'A',
+    AddOrderAttributed  = (byte)'F',
+    OrderExecuted       = (byte)'E',
+    OrderExecutedPrice  = (byte)'C',
+    OrderCancel         = (byte)'X',
+    OrderDelete         = (byte)'D',
+    OrderReplace        = (byte)'U',
+    TradeNonDisplay     = (byte)'P',
+    CrossTrade          = (byte)'Q',
+    ImbalanceIndicator  = (byte)'I'
+}
