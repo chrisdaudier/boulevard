@@ -1,7 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <ProjectReference Include="..\..\Core\Boulevard.MarketData.Engine\Boulevard.MarketData.Engine.csproj" />
+    <ProjectReference Include="..\..\Protocols\Boulevard.Protocol.Itch\Boulevard.Protocol.Itch.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

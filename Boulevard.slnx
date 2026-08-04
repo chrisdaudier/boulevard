@@ -3,4 +3,5 @@
   <Project Path="src/Core/Boulevard.MarketData.Engine/Boulevard.MarketData.Engine.csproj" />
   <Project Path="src/Protocols/Boulevard.Protocol.Itch/Boulevard.Protocol.Itch.csproj" />
   <Project Path="src/Simulators/Boulevard.Simulators.Nasdaq/Boulevard.Simulators.Nasdaq.csproj" />
+  <Project Path="src/Edge/Boulevard.Edge.MarketData/Boulevard.Edge.MarketData.csproj" />
 </Solution>

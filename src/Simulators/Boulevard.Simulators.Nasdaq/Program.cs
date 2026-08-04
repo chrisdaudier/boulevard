@@ -1,113 +1,140 @@
 using System.Diagnostics;
-using Boulevard.MarketData.Engine;
-using Boulevard.Protocol.Itch;
+using System.Net;
+using System.Net.Sockets;
 using Boulevard.Simulators.Nasdaq;
 using ZstdSharp;
 
 const string DefaultCapturePath =
     "/Users/chrisdaudier/Downloads/market_data/ny4-xnas-tvitch-a-20230822/ny4-xnas-tvitch-a-20230822T000000.pcap.zst";
 
-string capturePath = args.Length > 0 ? args[0] : DefaultCapturePath;
+const string MulticastIp = "239.255.0.1";
+const int MulticastPort = 1234;
+
+(string capturePath, double speed) = ParseArgs(args);
+
 Console.WriteLine($"[NASDAQ] Reading capture: {capturePath}");
+Console.WriteLine($"[NASDAQ] Publishing to {MulticastIp}:{MulticastPort}");
+Console.WriteLine(speed <= 0
+    ? "[NASDAQ] Replay mode: AFAP (as fast as possible, no pacing)"
+    : $"[NASDAQ] Replay mode: paced at {speed}x original capture timing");
 
 var stopwatch = Stopwatch.StartNew();
 
 long packetCount = 0;
-long addCount = 0;
-long executeCount = 0;
-long cancelCount = 0;
-long otherCount = 0;
+long bytesSent = 0;
 
-var books = new Dictionary<ushort, OrderBook>();
+// Defaults to "let the OS pick the route" (correct in a container, which has exactly one real
+// interface). Set MULTICAST_LOCAL_ADDRESS=127.0.0.1 only when running publisher+subscriber as
+// two processes on the same host with multiple virtual/bridged adapters (e.g. this Mac's
+// en1-en4), where an unpinned interface can cause the receiver to see duplicate deliveries.
+IPAddress multicastLocalAddress = IPAddress.TryParse(Environment.GetEnvironmentVariable("MULTICAST_LOCAL_ADDRESS"), out IPAddress? parsedAddress)
+    ? parsedAddress
+    : IPAddress.Any;
+
+using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 1);
+socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, multicastLocalAddress.GetAddressBytes());
+socket.SendBufferSize = 1 << 20;
+var multicastEndpoint = new IPEndPoint(IPAddress.Parse(MulticastIp), MulticastPort);
 
 using (FileStream fileStream = File.OpenRead(capturePath))
 using (var decompressionStream = new DecompressionStream(fileStream))
 {
     var pcapReader = new PcapReader(decompressionStream);
+    long? previousCaptureTimestampNs = null;
+    long previousSendTicks = 0;
 
-    while (pcapReader.TryReadNextPacket(out ReadOnlySpan<byte> frame))
+    while (pcapReader.TryReadNextPacket(out ReadOnlySpan<byte> frame, out long captureTimestampNs))
     {
         packetCount++;
 
-        if (!EthernetIpUdp.TryExtractUdpPayload(frame, out ReadOnlySpan<byte> udpPayload)
-            || udpPayload.Length < MoldUdp64Header.Size)
+        if (speed > 0 && previousCaptureTimestampNs.HasValue)
+        {
+            long captureDeltaNs = captureTimestampNs - previousCaptureTimestampNs.Value;
+            if (captureDeltaNs > 0)
+            {
+                long targetTicks = previousSendTicks + (long)(captureDeltaNs / speed * Stopwatch.Frequency / 1_000_000_000.0);
+                SpinWaitUntil(targetTicks);
+            }
+        }
+
+        previousCaptureTimestampNs = captureTimestampNs;
+        previousSendTicks = Stopwatch.GetTimestamp();
+
+        if (!EthernetIpUdp.TryExtractUdpPayload(frame, out ReadOnlySpan<byte> udpPayload))
         {
             continue;
         }
 
-        foreach (ReadOnlySpan<byte> message in new MoldUdp64Reader(udpPayload))
-        {
-            if (message.Length == 0)
-            {
-                continue;
-            }
-
-            switch (message[0])
-            {
-                case AddOrderMessage.MessageType when AddOrderMessage.TryParse(message, out AddOrderMessage add):
-                {
-                    addCount++;
-                    OrderBook book = books.TryGetValue(add.StockLocate, out OrderBook existing) ? existing : new OrderBook();
-                    book.AddOrder(add.OrderReferenceNumber, add.IsBuy ? Side.Buy : Side.Sell, (int)(add.PriceRaw / 100), add.Shares);
-                    books[add.StockLocate] = book;
-                    break;
-                }
-
-                case OrderExecutedMessage.MessageType when OrderExecutedMessage.TryParse(message, out OrderExecutedMessage exec):
-                {
-                    executeCount++;
-                    if (books.TryGetValue(exec.StockLocate, out OrderBook execBook))
-                    {
-                        execBook.Execute(exec.OrderReferenceNumber, exec.ExecutedShares);
-                        books[exec.StockLocate] = execBook;
-                    }
-
-                    break;
-                }
-
-                case OrderCancelMessage.MessageType when OrderCancelMessage.TryParse(message, out OrderCancelMessage cancel):
-                {
-                    cancelCount++;
-                    if (books.TryGetValue(cancel.StockLocate, out OrderBook cancelBook))
-                    {
-                        cancelBook.Cancel(cancel.OrderReferenceNumber, cancel.CanceledShares);
-                        books[cancel.StockLocate] = cancelBook;
-                    }
-
-                    break;
-                }
-
-                default:
-                    otherCount++;
-                    break;
-            }
-        }
+        SendWithBackpressureRetry(udpPayload);
+        bytesSent += udpPayload.Length;
     }
 }
 
 stopwatch.Stop();
 
 Console.WriteLine();
-Console.WriteLine("[NASDAQ] Pipeline summary");
-Console.WriteLine($" -> Packets read:       {packetCount:N0}");
-Console.WriteLine($" -> Add Order:          {addCount:N0}");
-Console.WriteLine($" -> Order Executed:     {executeCount:N0}");
-Console.WriteLine($" -> Order Cancel:       {cancelCount:N0}");
-Console.WriteLine($" -> Other ITCH types:   {otherCount:N0}");
-Console.WriteLine($" -> Distinct symbols:   {books.Count:N0}");
-Console.WriteLine($" -> Elapsed:            {stopwatch.ElapsedMilliseconds:N0} ms");
+Console.WriteLine("[NASDAQ] Publish summary");
+Console.WriteLine($" -> Packets read: {packetCount:N0}");
+Console.WriteLine($" -> Bytes sent:   {bytesSent:N0}");
+Console.WriteLine($" -> Elapsed:      {stopwatch.ElapsedMilliseconds:N0} ms");
 
-Console.WriteLine();
-Console.WriteLine("[NASDAQ] Sample BBOs (busiest symbols by resting shares):");
-
-var busiestFirst = books
-    .Select(kv => (StockLocate: kv.Key, Bbo: kv.Value.GetBbo()))
-    .OrderByDescending(x => x.Bbo.BidShares + x.Bbo.AskShares)
-    .Take(5);
-
-foreach ((ushort stockLocate, Bbo bbo) in busiestFirst)
+void SendWithBackpressureRetry(ReadOnlySpan<byte> payload)
 {
-    string bid = bbo.BidPriceCents.HasValue ? $"${bbo.BidPriceCents.Value / 100.0:F2} x {bbo.BidShares:N0}" : "-";
-    string ask = bbo.AskPriceCents.HasValue ? $"${bbo.AskPriceCents.Value / 100.0:F2} x {bbo.AskShares:N0}" : "-";
-    Console.WriteLine($" -> Locate {stockLocate,6}: BID {bid,-20} ASK {ask}");
+    while (true)
+    {
+        try
+        {
+            socket.SendTo(payload, SocketFlags.None, multicastEndpoint);
+            return;
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
+        {
+            // Kernel send buffer is momentarily full (e.g. a microburst); yield and retry
+            // rather than dropping the datagram.
+            Thread.SpinWait(1000);
+        }
+    }
+}
+
+static void SpinWaitUntil(long targetStopwatchTicks)
+{
+    while (true)
+    {
+        long remainingTicks = targetStopwatchTicks - Stopwatch.GetTimestamp();
+        if (remainingTicks <= 0)
+        {
+            return;
+        }
+
+        double remainingMs = remainingTicks * 1000.0 / Stopwatch.Frequency;
+        if (remainingMs > 2)
+        {
+            Thread.Sleep(1);
+        }
+        else
+        {
+            Thread.SpinWait(50);
+        }
+    }
+}
+
+static (string CapturePath, double Speed) ParseArgs(string[] args)
+{
+    string? capturePath = null;
+    double speed = 1.0;
+
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == "--speed" && i + 1 < args.Length)
+        {
+            speed = double.Parse(args[++i]);
+        }
+        else
+        {
+            capturePath = args[i];
+        }
+    }
+
+    return (capturePath ?? DefaultCapturePath, speed);
 }

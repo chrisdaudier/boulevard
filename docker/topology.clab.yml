@@ -1,0 +1,27 @@
+# Containerlab topology modeling the physical network between Carteret, NJ (exchange/publisher)
+# and Secaucus NY4 (edge feed handler/subscriber).
+#
+# Containerlab is Linux-native and doesn't run directly on macOS, so this isn't deployed from
+# the dev Mac - it's meant for a real Linux host/CI. Build the images first:
+#   docker build -t boulevard/nasdaq-sim -f docker/publisher.Dockerfile .
+#   docker build -t boulevard/edge-md -f docker/subscriber.Dockerfile .
+# then:
+#   clab deploy -t docker/topology.clab.yml
+#   docker exec -it clab-boulevard-network-nasdaq-sim tc qdisc add dev eth1 root netem delay 200us 20us distribution normal
+name: boulevard-network
+
+topology:
+  nodes:
+    nasdaq-sim:
+      kind: linux
+      image: boulevard/nasdaq-sim:latest
+      cmd: "/data/ny4-xnas-tvitch-a-20230822T110000.pcap.zst --speed 1.0"
+      binds:
+        - ./data:/data
+
+    edge-md:
+      kind: linux
+      image: boulevard/edge-md:latest
+
+  links:
+    - endpoints: ["nasdaq-sim:eth1", "edge-md:eth1"]

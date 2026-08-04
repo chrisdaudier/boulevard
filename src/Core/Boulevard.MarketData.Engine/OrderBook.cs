@@ -6,33 +6,33 @@ namespace Boulevard.MarketData.Engine;
 /// </summary>
 public struct OrderBook
 {
-    private sealed class DescendingComparer : IComparer<int>
+    private sealed class DescendingComparer : IComparer<uint>
     {
         public static readonly DescendingComparer Instance = new();
-        public int Compare(int x, int y) => y.CompareTo(x);
+        public int Compare(uint x, uint y) => y.CompareTo(x);
     }
 
     private readonly Dictionary<ulong, BookOrder> _ordersByReference;
-    private readonly SortedDictionary<int, long> _bidLevels;
-    private readonly SortedDictionary<int, long> _askLevels;
+    private readonly SortedDictionary<uint, long> _bidLevels;
+    private readonly SortedDictionary<uint, long> _askLevels;
 
     public OrderBook()
     {
         _ordersByReference = new Dictionary<ulong, BookOrder>();
-        _bidLevels = new SortedDictionary<int, long>(DescendingComparer.Instance);
-        _askLevels = new SortedDictionary<int, long>();
+        _bidLevels = new SortedDictionary<uint, long>(DescendingComparer.Instance);
+        _askLevels = new SortedDictionary<uint, long>();
     }
 
-    public void AddOrder(ulong orderReferenceNumber, Side side, int priceCents, uint shares)
+    public void AddOrder(ulong orderReferenceNumber, Side side, uint priceInTicks, uint shares)
     {
         _ordersByReference[orderReferenceNumber] = new BookOrder
         {
             Side = side,
-            PriceCents = priceCents,
+            PriceInTicks = priceInTicks,
             Shares = shares
         };
 
-        LevelsFor(side)[priceCents] = LevelsFor(side).GetValueOrDefault(priceCents) + shares;
+        LevelsFor(side)[priceInTicks] = LevelsFor(side).GetValueOrDefault(priceInTicks) + shares;
     }
 
     public void Execute(ulong orderReferenceNumber, uint executedShares)
@@ -59,25 +59,25 @@ public struct OrderBook
     {
         return new Bbo
         {
-            BidPriceCents = _bidLevels.Count > 0 ? _bidLevels.First().Key : null,
+            BidPriceInTicks = _bidLevels.Count > 0 ? _bidLevels.First().Key : null,
             BidShares = _bidLevels.Count > 0 ? _bidLevels.First().Value : 0,
-            AskPriceCents = _askLevels.Count > 0 ? _askLevels.First().Key : null,
+            AskPriceInTicks = _askLevels.Count > 0 ? _askLevels.First().Key : null,
             AskShares = _askLevels.Count > 0 ? _askLevels.First().Value : 0
         };
     }
 
-    private void ReduceShares(ulong orderReferenceNumber, BookOrder order, uint sharesToRemove)
+    private readonly void ReduceShares(ulong orderReferenceNumber, BookOrder order, uint sharesToRemove)
     {
         var levels = LevelsFor(order.Side);
-        long remainingAtLevel = levels.GetValueOrDefault(order.PriceCents) - sharesToRemove;
+        long remainingAtLevel = levels.GetValueOrDefault(order.PriceInTicks) - sharesToRemove;
 
         if (remainingAtLevel <= 0)
         {
-            levels.Remove(order.PriceCents);
+            levels.Remove(order.PriceInTicks);
         }
         else
         {
-            levels[order.PriceCents] = remainingAtLevel;
+            levels[order.PriceInTicks] = remainingAtLevel;
         }
 
         if (sharesToRemove >= order.Shares)
@@ -91,5 +91,5 @@ public struct OrderBook
         }
     }
 
-    private SortedDictionary<int, long> LevelsFor(Side side) => side == Side.Buy ? _bidLevels : _askLevels;
+    private readonly SortedDictionary<uint, long> LevelsFor(Side side) => side == Side.Buy ? _bidLevels : _askLevels;
 }
