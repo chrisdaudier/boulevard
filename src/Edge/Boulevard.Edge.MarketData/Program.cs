@@ -2,17 +2,19 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using Boulevard.Edge.MarketData;
 using Boulevard.MarketData.Engine;
 using Boulevard.Protocol.Itch;
 
 const string MulticastIp = "239.255.0.1";
 const int MulticastPort = 1234;
 const int ReceiveBufferSize = 2048;
-// Kept at 1 deliberately: overlapping >1 pending receives lets completion callbacks get
-// scheduled out of wire order (thread-pool jitter), which produces false MoldUDP64 sequence
-// gaps that aren't real network loss. A single outstanding receive guarantees processing
-// order matches delivery order, which matters for the sequence-continuity check.
-const int PooledBufferCount = 1;
+
+// Socket thread and worker thread run on dedicated OS threads (not the ThreadPool) so each can
+// be pinned to its own CPU core on Linux - isolating I/O from processing is the whole point of
+// this decoupling, and ThreadPool-serviced completions can't be reliably pinned at all.
+const int SocketThreadCore = 0;
+const int WorkerThreadCore = 1;
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) =>
@@ -37,7 +39,12 @@ long executeCount = 0;
 long cancelCount = 0;
 long otherCount = 0;
 long errorCount = 0;
+long ringOverflowCount = 0;
 
+// --- Socket-thread-owned state (sequencing/reorder). Guarded by sequenceLock, which exists
+// only to synchronize against the reporting thread's periodic cross-thread reads - the socket
+// thread itself is the sole mutator. ---
+var sequenceLock = new object();
 ulong? expectedNextSequence = null;
 long sequenceGapCount = 0;
 long missingMessageCount = 0;
@@ -64,12 +71,19 @@ for (int i = ReorderWindowCapacity - 1; i >= 0; i--)
 // Keyed by each buffered packet's starting MoldUDP64 sequence number.
 var pending = new SortedDictionary<ulong, (int BufferIndex, int Length, long ReceivedAtTicks)>();
 
+// --- Worker-thread-owned state (ITCH parsing / OrderBook mutation). Guarded by bookLock, same
+// reasoning as sequenceLock - the worker thread is the sole mutator. ---
+var bookLock = new object();
+var books = new Dictionary<ushort, OrderBook>();
+
 // Sized to comfortably exceed the ~464K Add/Execute/Cancel messages this capture produces,
 // so recording a latency sample never triggers a reallocation on the hot path.
 var latencySamplesUs = new List<long>(1_000_000);
 
-var books = new Dictionary<ushort, OrderBook>();
-var bookLock = new object();
+// Zero-allocation handoff from the socket thread to the worker thread. Behind an interface
+// so a future hand-rolled SPSC ring buffer can replace this without touching either thread's
+// loop - this is the only line that would need to change.
+IDatagramQueue datagramQueue = new ChannelDatagramQueue(capacity: 8192, ReceiveBufferSize);
 
 // Defaults to "let the OS pick the route" (correct in a container, which has exactly one real
 // interface). Set MULTICAST_LOCAL_ADDRESS=127.0.0.1 only when running publisher+subscriber as
@@ -79,7 +93,7 @@ IPAddress multicastLocalAddress = IPAddress.TryParse(Environment.GetEnvironmentV
     ? parsedAddress
     : IPAddress.Any;
 
-using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
 socket.Bind(new IPEndPoint(IPAddress.Any, MulticastPort));
 socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(IPAddress.Parse(MulticastIp), multicastLocalAddress));
@@ -87,26 +101,17 @@ socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new
 Console.WriteLine($"[EDGE] Bound to 0.0.0.0:{MulticastPort}, joined multicast group {MulticastIp}");
 Console.WriteLine("[EDGE] Waiting for datagrams. Press CTRL+C to exit.\n");
 
-var receiveArgsList = new List<SocketAsyncEventArgs>(PooledBufferCount);
-for (int i = 0; i < PooledBufferCount; i++)
-{
-    var receiveArgs = new SocketAsyncEventArgs();
-    receiveArgs.SetBuffer(new byte[ReceiveBufferSize], 0, ReceiveBufferSize);
-    receiveArgs.Completed += OnReceiveCompleted;
-    receiveArgsList.Add(receiveArgs);
-}
-
-foreach (SocketAsyncEventArgs receiveArgs in receiveArgsList)
-{
-    StartReceive(receiveArgs);
-}
+var socketThread = new Thread(SocketReceiveLoop) { Name = "Edge-Socket", IsBackground = true };
+var workerThread = new Thread(WorkerLoop) { Name = "Edge-Worker", IsBackground = true };
+socketThread.Start();
+workerThread.Start();
 
 var reportingTask = Task.Run(async () =>
 {
     using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
     while (await timer.WaitForNextTickAsync(cts.Token))
     {
-        lock (bookLock)
+        lock (sequenceLock)
         {
             // Ensures a genuinely lost packet still gets declared a gap even during a lull
             // with no new arrivals to trigger the opportunistic check in HandleIncomingPacket.
@@ -135,12 +140,16 @@ catch (OperationCanceledException)
     // Expected on CTRL+C.
 }
 
-foreach (SocketAsyncEventArgs receiveArgs in receiveArgsList)
-{
-    receiveArgs.Dispose();
-}
+// Disposing the socket unblocks the socket thread's blocking Receive() call with an exception.
+socket.Dispose();
+socketThread.Join();
 
-lock (bookLock)
+// No more datagrams can be enqueued now that the socket thread has stopped - let the worker
+// drain whatever's left, then it'll exit once WaitToDequeueAsync reports completion.
+datagramQueue.CompleteAdding();
+workerThread.Join();
+
+lock (sequenceLock)
 {
     // No more datagrams are coming - whatever's still buffered is a genuine gap now.
     FlushExpiredPending(Stopwatch.GetTimestamp(), forceAll: true);
@@ -150,69 +159,101 @@ Console.WriteLine();
 Console.WriteLine("[EDGE] Final summary");
 PrintSnapshot(live: false);
 
-void StartReceive(SocketAsyncEventArgs receiveArgs)
+datagramQueue.Dispose();
+
+void SocketReceiveLoop()
 {
+    LinuxThreadAffinity.TryPinCurrentThreadTo(SocketThreadCore, "socket");
+
+    // Disposing the socket from another thread does not reliably interrupt an in-flight
+    // blocking Receive() on every platform (observed hanging indefinitely on macOS) - a receive
+    // timeout guarantees this loop wakes up periodically to recheck cancellation regardless.
+    socket.ReceiveTimeout = 500;
+
+    var receiveBuffer = new byte[ReceiveBufferSize];
+
     while (!cts.IsCancellationRequested)
     {
-        bool pending;
+        int bytesReceived;
         try
         {
-            pending = socket.ReceiveAsync(receiveArgs);
+            bytesReceived = socket.Receive(receiveBuffer);
         }
         catch (ObjectDisposedException)
         {
-            return;
+            return; // shutting down
         }
-
-        if (pending)
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
         {
-            return;
+            continue; // just a wakeup to recheck cancellation
+        }
+        catch (SocketException)
+        {
+            if (cts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref errorCount);
+            continue;
         }
 
-        ProcessReceive(receiveArgs);
+        if (bytesReceived == 0)
+        {
+            continue;
+        }
+
+        long receiveTimestamp = Stopwatch.GetTimestamp();
+        Interlocked.Increment(ref packetCount);
+
+        ReadOnlySpan<byte> datagram = receiveBuffer.AsSpan(0, bytesReceived);
+        if (datagram.Length < MoldUdp64Header.Size)
+        {
+            continue;
+        }
+
+        MoldUdp64Header header = MoldUdp64Header.Parse(datagram);
+
+        lock (sequenceLock)
+        {
+            HandleIncomingPacket(header, datagram, receiveTimestamp);
+        }
     }
 }
 
-void OnReceiveCompleted(object? sender, SocketAsyncEventArgs receiveArgs)
+void WorkerLoop()
 {
-    if (cts.IsCancellationRequested)
+    LinuxThreadAffinity.TryPinCurrentThreadTo(WorkerThreadCore, "worker");
+
+    try
     {
-        return;
+        // ValueTask's awaiter doesn't support blocking GetResult() before completion (unlike
+        // Task<T>) - AsTask() gives this dedicated thread something it can actually block on.
+        while (datagramQueue.WaitToDequeueAsync(cts.Token).AsTask().GetAwaiter().GetResult())
+        {
+            while (datagramQueue.TryDequeue(out int slotIndex, out int length, out long receiveTimestamp))
+            {
+                ReadOnlySpan<byte> datagram = datagramQueue.GetSlotData(slotIndex, length);
+
+                lock (bookLock)
+                {
+                    DispatchMessages(datagram, receiveTimestamp);
+                }
+
+                datagramQueue.ReleaseSlot(slotIndex);
+            }
+        }
     }
-
-    ProcessReceive(receiveArgs);
-    StartReceive(receiveArgs);
-}
-
-void ProcessReceive(SocketAsyncEventArgs receiveArgs)
-{
-    if (receiveArgs.SocketError != SocketError.Success || receiveArgs.BytesTransferred == 0)
+    catch (OperationCanceledException)
     {
-        Interlocked.Increment(ref errorCount);
-        return;
-    }
-
-    long receiveTimestamp = Stopwatch.GetTimestamp();
-    ReadOnlySpan<byte> datagram = receiveArgs.MemoryBuffer.Span[..receiveArgs.BytesTransferred];
-    Interlocked.Increment(ref packetCount);
-
-    if (datagram.Length < MoldUdp64Header.Size)
-    {
-        return;
-    }
-
-    MoldUdp64Header header = MoldUdp64Header.Parse(datagram);
-
-    lock (bookLock)
-    {
-        HandleIncomingPacket(header, datagram, receiveTimestamp);
+        // Expected on shutdown.
     }
 }
 
-// Must be called while holding bookLock. Fast path: an in-order packet dispatches immediately
-// and then drains any now-contiguous buffered packets. A packet ahead of the expected sequence
-// is held in the reorder buffer rather than immediately flagged as a gap - it might just be
-// jitter-delayed, not lost.
+// Must be called while holding sequenceLock. Fast path: an in-order packet is handed to the
+// worker thread immediately and then any now-contiguous buffered packets are drained. A packet
+// ahead of the expected sequence is held in the reorder buffer rather than immediately flagged
+// as a gap - it might just be jitter-delayed, not lost.
 void HandleIncomingPacket(MoldUdp64Header header, ReadOnlySpan<byte> datagram, long receiveTimestamp)
 {
     if (header.MessageCount == 0)
@@ -230,7 +271,7 @@ void HandleIncomingPacket(MoldUdp64Header header, ReadOnlySpan<byte> datagram, l
 
     if (header.SequenceNumber == expectedNextSequence.Value)
     {
-        DispatchMessages(datagram, receiveTimestamp);
+        EnqueueForWorker(datagram, receiveTimestamp);
         expectedNextSequence = header.SequenceNumber + header.MessageCount;
         DrainPending();
         return;
@@ -240,7 +281,29 @@ void HandleIncomingPacket(MoldUdp64Header header, ReadOnlySpan<byte> datagram, l
     FlushExpiredPending(receiveTimestamp);
 }
 
-// Must be called while holding bookLock.
+// Must be called on the socket thread - copies the datagram into a pooled slot and hands it to
+// the worker thread. Never blocks: if the queue is full (worker falling behind), the datagram
+// is dropped and counted separately from network-level sequence gaps, since sequencing already
+// succeeded here - it's specifically the downstream processing that couldn't keep up.
+void EnqueueForWorker(ReadOnlySpan<byte> datagram, long receiveTimestamp)
+{
+    if (!datagramQueue.TryAcquireSlot(out int slotIndex, out Memory<byte> buffer))
+    {
+        Interlocked.Increment(ref ringOverflowCount);
+        return;
+    }
+
+    datagram.CopyTo(buffer.Span);
+
+    if (!datagramQueue.TryEnqueue(slotIndex, datagram.Length, receiveTimestamp))
+    {
+        datagramQueue.ReleaseSlot(slotIndex);
+        Interlocked.Increment(ref ringOverflowCount);
+    }
+}
+
+// Must be called while holding bookLock - this is the worker thread's ITCH parsing + OrderBook
+// mutation path, and the natural future home for strategy execution.
 void DispatchMessages(ReadOnlySpan<byte> datagram, long receiveTimestamp)
 {
     foreach (ReadOnlySpan<byte> message in new MoldUdp64Reader(datagram))
@@ -295,7 +358,7 @@ void DispatchMessages(ReadOnlySpan<byte> datagram, long receiveTimestamp)
     }
 }
 
-// Must be called while holding bookLock - holds an out-of-order datagram in a pooled buffer
+// Must be called while holding sequenceLock - holds an out-of-order datagram in a pooled buffer
 // (no per-packet heap allocation) until it's either drained in order or its wait times out.
 void BufferPending(MoldUdp64Header header, ReadOnlySpan<byte> datagram, long receivedAtTicks)
 {
@@ -315,7 +378,7 @@ void BufferPending(MoldUdp64Header header, ReadOnlySpan<byte> datagram, long rec
     pending[header.SequenceNumber] = (bufferIndex, datagram.Length, receivedAtTicks);
 }
 
-// Must be called while holding bookLock - processes any buffered packets that are now
+// Must be called while holding sequenceLock - processes any buffered packets that are now
 // contiguous with expectedNextSequence, advancing it as each one is consumed.
 void DrainPending()
 {
@@ -324,13 +387,13 @@ void DrainPending()
         pending.Remove(expectedNextSequence.Value);
         ReadOnlySpan<byte> bufferedDatagram = pendingBufferPool[entry.BufferIndex].AsSpan(0, entry.Length);
         MoldUdp64Header bufferedHeader = MoldUdp64Header.Parse(bufferedDatagram);
-        DispatchMessages(bufferedDatagram, entry.ReceivedAtTicks);
+        EnqueueForWorker(bufferedDatagram, entry.ReceivedAtTicks);
         expectedNextSequence = bufferedHeader.SequenceNumber + bufferedHeader.MessageCount;
         freeBufferIndices.Push(entry.BufferIndex);
     }
 }
 
-// Must be called while holding bookLock - gives up on the oldest buffered entry immediately,
+// Must be called while holding sequenceLock - gives up on the oldest buffered entry immediately,
 // counting it as a real gap. Used only when the reorder window is full.
 void ExpireOldestPending()
 {
@@ -346,10 +409,10 @@ void ExpireOldestPending()
     DrainPending();
 }
 
-// Must be called while holding bookLock - checks whether the earliest buffered packet has been
-// waiting long enough that the missing sequence range in front of it should be declared a real
-// gap rather than transient reordering. `forceAll: true` flushes everything regardless of age
-// (used at shutdown so the final summary doesn't leave stragglers uncounted).
+// Must be called while holding sequenceLock - checks whether the earliest buffered packet has
+// been waiting long enough that the missing sequence range in front of it should be declared a
+// real gap rather than transient reordering. `forceAll: true` flushes everything regardless of
+// age (used at shutdown so the final summary doesn't leave stragglers uncounted).
 void FlushExpiredPending(long nowTicks, bool forceAll = false)
 {
     while (pending.Count > 0)
@@ -373,7 +436,8 @@ void FlushExpiredPending(long nowTicks, bool forceAll = false)
 }
 
 // Must be called while holding bookLock - times from socket receipt through GetBbo() completing,
-// proving the full hot path (parse -> book update -> BBO recompute) stays fast under load.
+// proving the full pipeline (socket -> ring buffer -> parse -> book update -> BBO recompute)
+// stays fast under load.
 void RecordLatency(OrderBook book, long receiveTimestamp)
 {
     book.GetBbo();
@@ -414,15 +478,22 @@ void PrintSnapshot(bool live)
     Console.WriteLine($" -> Order Cancel:     {cancelCount:N0}");
     Console.WriteLine($" -> Other ITCH types: {otherCount:N0}");
     Console.WriteLine($" -> Receive errors:   {errorCount:N0}");
-    Console.WriteLine($" -> Sequence gaps:    {sequenceGapCount:N0} ({missingMessageCount:N0} messages missing)");
-    Console.WriteLine($" -> Duplicates:       {duplicateCount:N0}");
+    Console.WriteLine($" -> Ring overflow:    {Interlocked.Read(ref ringOverflowCount):N0}");
+
+    long pendingCount;
+    lock (sequenceLock)
+    {
+        Console.WriteLine($" -> Sequence gaps:    {sequenceGapCount:N0} ({missingMessageCount:N0} messages missing)");
+        Console.WriteLine($" -> Duplicates:       {duplicateCount:N0}");
+        pendingCount = pending.Count;
+    }
 
     (long p50, long p99, long max) = ComputeLatencyPercentiles();
     Console.WriteLine($" -> Socket->BBO latency (us): p50={p50:N0} p99={p99:N0} max={max:N0} (n={latencySamplesUs.Count:N0})");
+    Console.WriteLine($" -> Reorder buffered: {pendingCount:N0} (awaiting resequencing)");
 
     lock (bookLock)
     {
-        Console.WriteLine($" -> Reorder buffered: {pending.Count:N0} (awaiting resequencing)");
         Console.WriteLine($" -> Distinct symbols: {books.Count:N0}");
         Console.WriteLine(" -> Busiest BBOs:");
 
