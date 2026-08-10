@@ -1,0 +1,24 @@
+{
+  "applications": [
+    {
+      "appId": "boulevard-watchlist",
+      "name": "boulevard-watchlist",
+      "title": "Boulevard Ticker Watchlist",
+      "description": "Live BBO for a hand-picked list of tickers. Clicking a row broadcasts fdc3.instrument context to any connected app on the same channel.",
+      "type": "web",
+      "details": {
+        "url": "http://localhost:5174"
+      }
+    },
+    {
+      "appId": "boulevard-oms-order-entry",
+      "name": "boulevard-oms-order-entry",
+      "title": "Boulevard OMS Order Entry",
+      "description": "L2 depth and a mock order ticket for whichever ticker is currently active - driven by fdc3.instrument context, or a manual ticker override for standalone use.",
+      "type": "web",
+      "details": {
+        "url": "http://localhost:5173"
+      }
+    }
+  ]
+}

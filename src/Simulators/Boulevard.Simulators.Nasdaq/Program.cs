@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using Boulevard.Simulators.Nasdaq;
 using ZstdSharp;
 
@@ -10,18 +11,38 @@ const string DefaultCapturePath =
 const string MulticastIp = "239.255.0.1";
 const int MulticastPort = 1234;
 
-(string capturePath, double speed) = ParseArgs(args);
+(List<string> capturePaths, double speed, bool loop) = ParseArgs(args);
 
-Console.WriteLine($"[NASDAQ] Reading capture: {capturePath}");
+Console.WriteLine(capturePaths.Count == 1
+    ? $"[NASDAQ] Reading capture: {capturePaths[0]}"
+    : $"[NASDAQ] Reading {capturePaths.Count} chained captures: {Path.GetFileName(capturePaths[0])} .. {Path.GetFileName(capturePaths[^1])}");
 Console.WriteLine($"[NASDAQ] Publishing to {MulticastIp}:{MulticastPort}");
 Console.WriteLine(speed <= 0
     ? "[NASDAQ] Replay mode: AFAP (as fast as possible, no pacing)"
     : $"[NASDAQ] Replay mode: paced at {speed}x original capture timing");
+if (loop)
+{
+    Console.WriteLine("[NASDAQ] Looping: will restart from the beginning after each full pass. Press CTRL+C to stop.");
+}
 
-var stopwatch = Stopwatch.StartNew();
+using var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) =>
+{
+    Console.WriteLine("\n[NASDAQ] Shutdown signal received (SIGINT).");
+    eventArgs.Cancel = true;
+    cts.Cancel();
+};
+
+using PosixSignalRegistration sigTermRegistration = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+{
+    Console.WriteLine("\n[NASDAQ] Shutdown signal received (SIGTERM).");
+    context.Cancel = true;
+    cts.Cancel();
+});
 
 long packetCount = 0;
 long bytesSent = 0;
+int lapCount = 0;
 
 // Defaults to "let the OS pick the route" (correct in a container, which has exactly one real
 // interface). Set MULTICAST_LOCAL_ADDRESS=127.0.0.1 only when running publisher+subscriber as
@@ -37,44 +58,74 @@ socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface
 socket.SendBufferSize = 1 << 20;
 var multicastEndpoint = new IPEndPoint(IPAddress.Parse(MulticastIp), MulticastPort);
 
-using (FileStream fileStream = File.OpenRead(capturePath))
-using (var decompressionStream = new DecompressionStream(fileStream))
+var stopwatch = Stopwatch.StartNew();
+
+do
 {
-    var pcapReader = new PcapReader(decompressionStream);
+    lapCount++;
+
+    // Shared across every chained file within this lap (reset only when a new lap starts) - the
+    // capture timestamps are real Unix-epoch nanoseconds and these files are contiguous slices of
+    // one continuous session, so pacing flows across a file boundary exactly like it does across
+    // any other pair of consecutive packets, with no artificial gap or reset.
     long? previousCaptureTimestampNs = null;
     long previousSendTicks = 0;
 
-    while (pcapReader.TryReadNextPacket(out ReadOnlySpan<byte> frame, out long captureTimestampNs))
+    foreach (string capturePath in capturePaths)
     {
-        packetCount++;
-
-        if (speed > 0 && previousCaptureTimestampNs.HasValue)
+        if (cts.IsCancellationRequested)
         {
-            long captureDeltaNs = captureTimestampNs - previousCaptureTimestampNs.Value;
-            if (captureDeltaNs > 0)
+            break;
+        }
+
+        using FileStream fileStream = File.OpenRead(capturePath);
+        using var decompressionStream = new DecompressionStream(fileStream);
+        var pcapReader = new PcapReader(decompressionStream);
+
+        while (!cts.IsCancellationRequested && pcapReader.TryReadNextPacket(out ReadOnlySpan<byte> frame, out long captureTimestampNs))
+        {
+            packetCount++;
+
+            if (speed > 0 && previousCaptureTimestampNs.HasValue)
             {
-                long targetTicks = previousSendTicks + (long)(captureDeltaNs / speed * Stopwatch.Frequency / 1_000_000_000.0);
-                SpinWaitUntil(targetTicks);
+                long captureDeltaNs = captureTimestampNs - previousCaptureTimestampNs.Value;
+                if (captureDeltaNs > 0)
+                {
+                    long targetTicks = previousSendTicks + (long)(captureDeltaNs / speed * Stopwatch.Frequency / 1_000_000_000.0);
+                    SpinWaitUntil(targetTicks, cts.Token);
+                }
             }
+
+            previousCaptureTimestampNs = captureTimestampNs;
+            previousSendTicks = Stopwatch.GetTimestamp();
+
+            if (!EthernetIpUdp.TryExtractUdpPayload(frame, out ReadOnlySpan<byte> udpPayload))
+            {
+                continue;
+            }
+
+            SendWithBackpressureRetry(udpPayload);
+            bytesSent += udpPayload.Length;
         }
 
-        previousCaptureTimestampNs = captureTimestampNs;
-        previousSendTicks = Stopwatch.GetTimestamp();
-
-        if (!EthernetIpUdp.TryExtractUdpPayload(frame, out ReadOnlySpan<byte> udpPayload))
+        if (capturePaths.Count > 1)
         {
-            continue;
+            Console.WriteLine($"[NASDAQ] Finished {Path.GetFileName(capturePath)} ({packetCount:N0} packets, {bytesSent:N0} bytes so far).");
         }
+    }
 
-        SendWithBackpressureRetry(udpPayload);
-        bytesSent += udpPayload.Length;
+    if (loop && !cts.IsCancellationRequested)
+    {
+        Console.WriteLine($"[NASDAQ] Lap {lapCount:N0} complete ({packetCount:N0} packets, {bytesSent:N0} bytes so far) - restarting from the beginning.");
     }
 }
+while (loop && !cts.IsCancellationRequested);
 
 stopwatch.Stop();
 
 Console.WriteLine();
 Console.WriteLine("[NASDAQ] Publish summary");
+Console.WriteLine($" -> Laps:         {lapCount:N0}");
 Console.WriteLine($" -> Packets read: {packetCount:N0}");
 Console.WriteLine($" -> Bytes sent:   {bytesSent:N0}");
 Console.WriteLine($" -> Elapsed:      {stopwatch.ElapsedMilliseconds:N0} ms");
@@ -97,9 +148,9 @@ void SendWithBackpressureRetry(ReadOnlySpan<byte> payload)
     }
 }
 
-static void SpinWaitUntil(long targetStopwatchTicks)
+static void SpinWaitUntil(long targetStopwatchTicks, CancellationToken cancellationToken)
 {
-    while (true)
+    while (!cancellationToken.IsCancellationRequested)
     {
         long remainingTicks = targetStopwatchTicks - Stopwatch.GetTimestamp();
         if (remainingTicks <= 0)
@@ -119,10 +170,12 @@ static void SpinWaitUntil(long targetStopwatchTicks)
     }
 }
 
-static (string CapturePath, double Speed) ParseArgs(string[] args)
+static (List<string> CapturePaths, double Speed, bool Loop) ParseArgs(string[] args)
 {
-    string? capturePath = null;
+    var explicitPaths = new List<string>();
     double speed = 1.0;
+    bool loop = false;
+    double? minutes = null;
 
     for (int i = 0; i < args.Length; i++)
     {
@@ -130,11 +183,65 @@ static (string CapturePath, double Speed) ParseArgs(string[] args)
         {
             speed = double.Parse(args[++i]);
         }
+        else if (args[i] == "--loop")
+        {
+            loop = true;
+        }
+        else if (args[i] == "--minutes" && i + 1 < args.Length)
+        {
+            minutes = double.Parse(args[++i]);
+        }
         else
         {
-            capturePath = args[i];
+            explicitPaths.Add(args[i]);
         }
     }
 
-    return (capturePath ?? DefaultCapturePath, speed);
+    if (explicitPaths.Count == 0)
+    {
+        explicitPaths.Add(DefaultCapturePath);
+    }
+
+    List<string> capturePaths = minutes.HasValue && explicitPaths.Count == 1
+        ? ExpandSequentialFiles(explicitPaths[0], minutes.Value)
+        : explicitPaths;
+
+    return (capturePaths, speed, loop);
+}
+
+/// <summary>
+/// Given one capture file named "&lt;prefix&gt;T{HHMMSS}.pcap.zst", finds and appends the
+/// following 10-minute-chunked files in the same directory (same naming convention) until at
+/// least <paramref name="minutes"/> of capture is queued up, or no next file is found.
+/// </summary>
+static List<string> ExpandSequentialFiles(string firstFilePath, double minutes)
+{
+    string directory = Path.GetDirectoryName(Path.GetFullPath(firstFilePath)) ?? ".";
+    string fileName = Path.GetFileName(firstFilePath);
+
+    int timeMarkerIndex = fileName.LastIndexOf('T');
+    if (timeMarkerIndex < 0 || fileName.Length < timeMarkerIndex + 7)
+    {
+        throw new FormatException($"Expected a filename like '<prefix>T{{HHMMSS}}.pcap.zst', got '{fileName}'.");
+    }
+
+    string prefix = fileName[..timeMarkerIndex];
+    string suffix = fileName[(timeMarkerIndex + 7)..];
+    TimeSpan current = TimeSpan.ParseExact(fileName.Substring(timeMarkerIndex + 1, 6), "hhmmss", null);
+
+    var files = new List<string> { firstFilePath };
+    for (TimeSpan queued = TimeSpan.FromMinutes(10); queued < TimeSpan.FromMinutes(minutes); queued += TimeSpan.FromMinutes(10))
+    {
+        current += TimeSpan.FromMinutes(10);
+        string candidate = Path.Combine(directory, $"{prefix}T{current:hhmmss}{suffix}");
+        if (!File.Exists(candidate))
+        {
+            Console.WriteLine($"[NASDAQ] Stopping auto-chain: no file found at {candidate} (requested {minutes} min, queued {queued.TotalMinutes} min across {files.Count} file(s)).");
+            break;
+        }
+
+        files.Add(candidate);
+    }
+
+    return files;
 }

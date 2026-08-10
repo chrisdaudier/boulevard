@@ -1,0 +1,2 @@
+# Locally-generated mkcert dev certificates - machine-specific, never commit the private key.
+*.pem

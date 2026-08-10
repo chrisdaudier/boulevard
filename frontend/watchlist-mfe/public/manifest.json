@@ -1,0 +1,63 @@
+{
+  "platform": {
+    "uuid": "boulevard-desktop",
+    "name": "Boulevard Desktop",
+    "autoShow": false,
+    "providerUrl": "https://localhost:5174/provider.html",
+    "defaultWindowOptions": {
+      "fdc3InteropApi": "2.0"
+    },
+    "defaultViewOptions": {
+      "fdc3InteropApi": "2.0"
+    }
+  },
+  "runtime": {
+    "version": "stable"
+  },
+  "snapshot": {
+    "windows": [
+      {
+        "name": "boulevard-main",
+        "defaultWidth": 1600,
+        "defaultHeight": 900,
+        "layout": {
+          "content": [
+            {
+              "type": "row",
+              "content": [
+                {
+                  "type": "stack",
+                  "width": 35,
+                  "content": [
+                    {
+                      "type": "component",
+                      "componentName": "view",
+                      "componentState": {
+                        "name": "boulevard-watchlist",
+                        "url": "https://localhost:5174"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "stack",
+                  "width": 65,
+                  "content": [
+                    {
+                      "type": "component",
+                      "componentName": "view",
+                      "componentState": {
+                        "name": "boulevard-oms-order-entry",
+                        "url": "https://localhost:5173"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
