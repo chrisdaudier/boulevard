@@ -10,11 +10,13 @@ export interface L2Snapshot {
   Asks: PriceLevel[];
 }
 
-export interface L2Row {
-  side: "BID" | "ASK";
+/** One row of a side-by-side depth ladder: bid columns on the left, ask columns on the right. */
+export interface DepthRow {
   level: number;
-  price: number;
-  shares: number;
+  bidShares: number | null;
+  bidPrice: number | null;
+  askPrice: number | null;
+  askShares: number | null;
 }
 
 export type OrderSide = "BUY" | "SELL";

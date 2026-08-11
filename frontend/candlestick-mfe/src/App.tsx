@@ -1,17 +1,21 @@
-import { useRef } from "react";
-import { AllCommunityModule, ModuleRegistry } from "ag-grid-community";
+import { useRef, useState } from "react";
 import { useActiveTicker } from "./useActiveTicker";
-import { useActiveSymbolFeed } from "./useActiveSymbolFeed";
+import { useCandles } from "./useCandles";
 import { useFdc3Channels } from "./useFdc3Channels";
 import { ChannelSelector } from "./ChannelSelector";
-import { OrderTicketPanel } from "./OrderTicketPanel";
-import { DepthLadder } from "./DepthLadder";
+import { CandlestickChart } from "./CandlestickChart";
 
-ModuleRegistry.registerModules([AllCommunityModule]);
+const INTERVAL_OPTIONS = [
+  { label: "5s", seconds: 5 },
+  { label: "10s", seconds: 10 },
+  { label: "30s", seconds: 30 },
+  { label: "1m", seconds: 60 },
+];
 
 function App() {
   const { ticker, source, setManualTicker } = useActiveTicker();
-  const { rows, snapshot, status } = useActiveSymbolFeed(ticker);
+  const [intervalSeconds, setIntervalSeconds] = useState(10);
+  const { candles, status } = useCandles(ticker, intervalSeconds);
   const { connected, channels, currentChannelId, selectChannel } = useFdc3Channels();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -44,6 +48,13 @@ function App() {
         <button onClick={handleLoad} style={{ cursor: "pointer" }}>
           Load
         </button>
+        <select value={intervalSeconds} onChange={(e) => setIntervalSeconds(Number(e.target.value))} style={{ padding: "4px 8px" }}>
+          {INTERVAL_OPTIONS.map((opt) => (
+            <option key={opt.seconds} value={opt.seconds}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
         <p style={{ margin: 0, fontFamily: "monospace", fontSize: 13 }}>
           Active: <strong>{ticker ?? "-"}</strong>
           {source && <span style={{ color: "#888" }}> ({source})</span>} &nbsp;|&nbsp; Solace: <strong>{status}</strong>{" "}
@@ -54,10 +65,18 @@ function App() {
         </div>
       </div>
 
-      <OrderTicketPanel ticker={ticker} snapshot={snapshot} />
+      <p style={{ margin: "0 0 8px", color: "#888", fontSize: 12 }}>
+        Candles are built from the BBO midpoint, not trade prints - Boulevard doesn't distribute individual trades to the frontend.
+      </p>
 
-      <div style={{ flex: 1, minHeight: 0, marginTop: 12 }}>
-        <DepthLadder rows={rows} />
+      <div style={{ flex: 1, minHeight: 0 }}>
+        {candles.length === 0 ? (
+          <p style={{ color: "#888" }}>
+            No data yet - broadcast a ticker from the Watchlist MFE, or type one above and click Load.
+          </p>
+        ) : (
+          <CandlestickChart candles={candles} />
+        )}
       </div>
     </div>
   );

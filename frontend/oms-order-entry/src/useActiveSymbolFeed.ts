@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { connectSymbolFeed, type SymbolFeedConnection } from "./solaceClient";
-import type { L2Row, L2Snapshot } from "./types";
+import type { DepthRow, L2Snapshot } from "./types";
 
 const SOLACE_URL = "ws://localhost:8008";
 const SOLACE_VPN = "default";
@@ -11,20 +11,31 @@ const TOPIC_PREFIX = "md/l2/nasdaq/";
 // Matches the backend's own publish cadence (Edge.MarketData sweeps every 250ms).
 const REFRESH_INTERVAL_MS = 250;
 
-function toRows(snapshot: L2Snapshot | null): L2Row[] {
+function toDepthRows(snapshot: L2Snapshot | null): DepthRow[] {
   if (!snapshot) {
     return [];
   }
 
-  const rows: L2Row[] = [];
-  snapshot.Bids.forEach((level, index) => rows.push({ side: "BID", level: index + 1, price: level.Price, shares: level.Shares }));
-  snapshot.Asks.forEach((level, index) => rows.push({ side: "ASK", level: index + 1, price: level.Price, shares: level.Shares }));
+  const depth = Math.max(snapshot.Bids.length, snapshot.Asks.length);
+  const rows: DepthRow[] = [];
+  for (let i = 0; i < depth; i++) {
+    const bid = snapshot.Bids[i];
+    const ask = snapshot.Asks[i];
+    rows.push({
+      level: i + 1,
+      bidShares: bid?.Shares ?? null,
+      bidPrice: bid?.Price ?? null,
+      askPrice: ask?.Price ?? null,
+      askShares: ask?.Shares ?? null,
+    });
+  }
+
   return rows;
 }
 
 /** L2 depth for exactly one symbol at a time - re-subscribes whenever the active ticker changes. */
 export function useActiveSymbolFeed(ticker: string | null) {
-  const [rows, setRows] = useState<L2Row[]>([]);
+  const [rows, setRows] = useState<DepthRow[]>([]);
   const [snapshot, setSnapshot] = useState<L2Snapshot | null>(null);
   const [status, setStatus] = useState("connecting");
   const snapshotRef = useRef<L2Snapshot | null>(null);
@@ -48,7 +59,7 @@ export function useActiveSymbolFeed(ticker: string | null) {
     connection.setTickers(tickerRef.current ? [tickerRef.current] : []);
 
     const interval = setInterval(() => {
-      setRows(toRows(snapshotRef.current));
+      setRows(toDepthRows(snapshotRef.current));
       setSnapshot(snapshotRef.current);
     }, REFRESH_INTERVAL_MS);
 

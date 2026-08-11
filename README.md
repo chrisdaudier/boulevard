@@ -6,8 +6,9 @@ of independently-run **strategy pods** plug into, rather than each pod standing 
 handlers and book-building logic. It replays real historical NASDAQ TotalView-ITCH 5.0 exchange
 data over real UDP multicast, reconstructs a full L3 order book, and distributes both the raw
 feed (for pods that want to build their own book) and a conflated L2 view (for pods and desktop
-tools that just need top-of-book/depth) — down to React micro-frontends running inside an
-OpenFin/HERE Core desktop, wired together over FDC3.
+tools that just need top-of-book/depth) — down to four React micro-frontends (watchlist, order
+entry, order blotter, candlestick chart) running inside an OpenFin/HERE Core desktop, wired
+together over FDC3.
 
 Nothing here talks to a real exchange. The publisher replays captured pcap data on a loop, which
 makes the whole pipeline runnable and demoable on a laptop while remaining structurally identical
@@ -88,15 +89,17 @@ Within the mid-frequency tier, .NET earns its place on engineering economics as 
                                        │                              │  Messaging (WebSocket) egress
                                        └─────────────────────────────┘
                                                       │  WebSocket :8008
-                              ┌───────────────────────┴───────────────────────┐
-                              ▼                                               ▼
-                 ┌─────────────────────────┐                    ┌─────────────────────────────┐
-                 │ frontend/watchlist-mfe   │  ── FDC3 broadcast ──▶ │ frontend/oms-order-entry     │
-                 │ (React + AG Grid)        │  fdc3.instrument       │ (React + AG Grid)             │
-                 └─────────────────────────┘                    └─────────────────────────────┘
-                              └──────────────────┬──────────────────┘
-                                                  ▼
-                                   OpenFin / HERE Core desktop container
+                    ┌───────────────┬───────────────────────┼───────────────────────┐
+                    ▼               ▼                       ▼                       ▼
+       ┌─────────────────┐ ┌──────────────────┐  ┌─────────────────────┐  ┌─────────────────┐
+       │ watchlist-mfe    │ │ oms-order-entry  │  │ candlestick-mfe      │  │ order-blotter-mfe│
+       │ (AG Grid)        │ │ (order ticket +  │  │ (lightweight-charts, │  │ (AG Grid)        │
+       │ :5174            │ │  bid/ask ladder) │  │  midpoint OHLC)       │  │ :5175            │
+       │                  │ │ :5173            │  │ :5176                │  │                  │
+       └─────────────────┘ └──────────────────┘  └─────────────────────┘  └─────────────────┘
+              │ fdc3.instrument     ▲  │ blvd.order (custom context)              ▲
+              └─────────────────────┘  └───────────────────────────────────────────┘
+                                   all four share one OpenFin / HERE Core desktop container
                                    (frontend/interop/openfin/manifest.json)
 ```
 
@@ -109,9 +112,11 @@ Within the mid-frequency tier, .NET earns its place on engineering economics as 
 | `Boulevard.Simulators.Nasdaq` | Reads nanosecond-resolution pcap captures (Zstandard-compressed) and republishes them over real UDP multicast using MoldUDP64 framing, paced to the original capture timing (or as-fast-as-possible). Supports chaining multiple capture files and looping for extended/continuous replay. |
 | `Boulevard.Edge.MarketData` | The Edge tier. Thread-decoupled: a dedicated socket thread does blocking receive and sequence/reorder handling; a dedicated worker thread drains a bounded `System.Threading.Channels`-based queue, parses messages, and mutates per-symbol `OrderBook` instances. Publishes conflated L2 snapshots for the busiest symbols on a timer, entirely off the mutation hot path. |
 | `Boulevard.Edge.SolaceGateway` | A deliberately thin bridge: UDP in, MQTT out. No ITCH or order-book knowledge, so there's exactly one place or business logic can diverge from ground truth — `Edge.MarketData`. |
-| `frontend/watchlist-mfe` | React + AG Grid micro-frontend. A user-curated, localStorage-persisted watchlist subscribing per-symbol to Solace (not the full feed). Selecting a row broadcasts an `fdc3.instrument` context. |
-| `frontend/oms-order-entry` | React + AG Grid micro-frontend. Shows L2 depth for exactly one "active" symbol (driven by FDC3 context or manual entry) plus a mock order ticket — no real order routing exists yet. |
-| `frontend/interop/` | OpenFin/HERE Core Platform manifest, FDC3 App Directory entry, and the mkcert-issued local TLS cert used to launch the two MFEs side-by-side inside one desktop container. |
+| `frontend/watchlist-mfe` | React + AG Grid micro-frontend. A user-curated, localStorage-persisted watchlist (defaults to AAPL, MSFT, NVDA, GOOG, AMZN on first run) subscribing per-symbol to Solace, not the full feed. Selecting a row broadcasts an `fdc3.instrument` context. Also hosts the platform manifest and provider page as static files for desktop interop (see below). |
+| `frontend/oms-order-entry` | React micro-frontend, single-column layout: a mock order ticket on top, a combined bid/ask depth ladder (one row per level, both sides side-by-side) below — for exactly one "active" symbol (driven by FDC3 context, defaulting to AAPL, or manual entry). Submitting an order broadcasts a custom `blvd.order` FDC3 context rather than keeping any order history of its own. |
+| `frontend/order-blotter-mfe` | React + AG Grid micro-frontend with no state of its own beyond what it's received — records every order broadcast on the `blvd.order` context by `oms-order-entry` on the same channel. |
+| `frontend/candlestick-mfe` | React micro-frontend using `lightweight-charts`. Renders a live candlestick chart for the active symbol, built client-side from the BBO midpoint at a selectable interval (5s/10s/30s/1m) — Boulevard doesn't distribute individual trade prints to the frontend, so this is a midpoint-derived proxy for a real trade-based candle, clearly labeled as such in the UI. |
+| `frontend/interop/` | OpenFin/HERE Core Platform manifest, FDC3 App Directory entry, and the mkcert-issued local TLS cert used to launch all four MFEs inside one desktop container. |
 
 ## How low latency is maintained
 
@@ -178,13 +183,16 @@ mid-frequency pod's own decision loop.
 - Solace → desktop: browser/desktop clients (the MFEs) connect directly to Solace over its native
   Web Messaging API (a real WebSocket, not MQTT-over-WebSocket) — no server-side fan-out process in
   the middle.
-- MFE ↔ MFE: the two MFEs don't talk to each other directly. They're independently-deployable web
+- MFE ↔ MFE: the four MFEs don't talk to each other directly. They're independently-deployable web
   apps hosted as separate views inside one OpenFin/HERE Core platform window, and they share
-  context (e.g. "the user just selected AAPL") over **FDC3** — the vendor-neutral desktop
-  interop standard, via `@finos/fdc3`'s `getAgent()`/user-channel APIs. This is the same mechanism
-  that would let a pod's own, differently-built MFE join the same desktop and interoperate with
-  Boulevard's, which is the point in a multi-manager environment where pods do not all share one
-  frontend stack.
+  context over **FDC3** — the vendor-neutral desktop interop standard, via `@finos/fdc3`'s
+  `getAgent()`/user-channel APIs. `watchlist-mfe` broadcasts the standard `fdc3.instrument`
+  context on row click; `oms-order-entry` and `candlestick-mfe` both listen for it to drive their
+  "active ticker"; `oms-order-entry` also broadcasts a custom `blvd.order` context (FDC3 has no
+  built-in order type) on submit, which `order-blotter-mfe` listens for. This is the same
+  mechanism that would let a pod's own, differently-built MFE join the same desktop and
+  interoperate with Boulevard's, which is the point in a multi-manager environment where pods do
+  not all share one frontend stack.
 
 ## Repository layout
 
@@ -198,8 +206,10 @@ src/
   Edge/Boulevard.Edge.MarketData/           L3 ingestion, book maintenance, L2 publishing
   Edge/Boulevard.Edge.SolaceGateway/        UDP L2 → MQTT bridge
 frontend/
-  watchlist-mfe/                            Ticker watchlist MFE
-  oms-order-entry/                          Single-symbol L2 + mock order ticket MFE
+  watchlist-mfe/                            Ticker watchlist MFE (:5174)
+  oms-order-entry/                          Order ticket + bid/ask depth ladder MFE (:5173)
+  order-blotter-mfe/                        Order blotter MFE (:5175)
+  candlestick-mfe/                          Candlestick chart MFE (:5176)
   interop/                                  OpenFin/HERE Core manifest, FDC3 App Directory, dev TLS cert
 docker/                                     Dockerfiles + Containerlab topology for containerized network testing
 ```
@@ -209,7 +219,7 @@ docker/                                     Dockerfiles + Containerlab topology 
 | Tool | Used for |
 |---|---|
 | [.NET 10 SDK](https://dotnet.microsoft.com/download) | All backend services |
-| [Node.js](https://nodejs.org/) 20+ and npm | Both frontend MFEs |
+| [Node.js](https://nodejs.org/) 20+ and npm | All four frontend MFEs |
 | [Docker](https://www.docker.com/) | Running the Solace PubSub+ broker |
 | A NASDAQ TotalView-ITCH 5.0 pcap capture set | Market data source. This project was developed against real historical captures (e.g. from [Databento](https://databento.com/)) — nanosecond-resolution, gzip/Zstandard-compressed pcap, one file per ~10-minute window, named `<venue>T<HHMMSS>.pcap.zst`. |
 | [mkcert](https://github.com/FiloSottile/mkcert) (`brew install mkcert`) | Only needed for desktop interop — HERE Core's `fins://` launch scheme requires HTTPS and will not accept an untrusted self-signed cert. |
@@ -273,17 +283,25 @@ lifecycle started before your replay window began.
 ### 5. Run the frontends
 
 ```
-cd frontend/watchlist-mfe && npm install && npm run dev      # http://localhost:5174
-cd frontend/oms-order-entry && npm install && npm run dev    # http://localhost:5173
+cd frontend/watchlist-mfe && npm install && npm run dev       # https://localhost:5174
+cd frontend/oms-order-entry && npm install && npm run dev     # https://localhost:5173
+cd frontend/order-blotter-mfe && npm install && npm run dev   # https://localhost:5175
+cd frontend/candlestick-mfe && npm install && npm run dev     # https://localhost:5176
 ```
 
-Open either URL directly in a browser to use it standalone (no desktop container needed) — both
-apps fall back gracefully to "Interop: standalone" and local-only ticker entry when no FDC3 desktop
-agent is present.
+Open any of the four URLs directly in a browser to use it standalone (no desktop container
+needed) — every app falls back gracefully to "Interop: standalone" and local-only ticker entry
+when no FDC3 desktop agent is present (`order-blotter-mfe` just won't receive anything, since
+orders only ever arrive as an FDC3 broadcast).
+
+Each dev server is already configured for HTTPS via the shared mkcert certificate in
+`frontend/interop/certs/` (see [Desktop interop](#desktop-interop-openfinhere-core) below to
+generate it) — plain HTTP is not supported, so a fresh checkout needs that certificate generated
+once before `npm run dev` will start cleanly.
 
 ## Desktop interop (OpenFin / HERE Core)
 
-Running both MFEs inside one desktop container with live FDC3 context sharing needs a bit more
+Running all four MFEs inside one desktop container with live FDC3 context sharing needs a bit more
 setup than a browser tab, because HERE Core's `fins://` launch scheme fetches the manifest over
 HTTPS and will hard-reject an untrusted certificate (no click-through, unlike a browser).
 
@@ -305,9 +323,9 @@ HTTPS and will hard-reject an untrusted certificate (no click-through, unlike a 
      "$(mkcert -CAROOT)/rootCA.pem"
    ```
 
-2. **Start both MFE dev servers** (step 5 above) — they're already configured to serve over HTTPS
-   using the certs generated above (`vite.config.ts` in each app), and `watchlist-mfe` also serves
-   the platform manifest and provider page as static files (`public/manifest.json`,
+2. **Start all four MFE dev servers** (step 5 above) — they're already configured to serve over
+   HTTPS using the certs generated above (`vite.config.ts` in each app), and `watchlist-mfe` also
+   serves the platform manifest and provider page as static files (`public/manifest.json`,
    `public/provider.html`).
 
 3. **Install OpenFin / HERE Core** if you don't already have it — the free
@@ -320,13 +338,14 @@ HTTPS and will hard-reject an untrusted certificate (no click-through, unlike a 
    ```
    open "fins://localhost:5174/manifest.json"
    ```
-   You should see one window with two views side-by-side: `watchlist-mfe` (35% width) and
-   `oms-order-entry` (65% width), each showing `Interop: connected` and a row of colored
-   FDC3 channel dots.
+   You should see one window with four views: `watchlist-mfe` and `oms-order-entry` in narrow
+   columns on the left, `candlestick-mfe` and `order-blotter-mfe` stacked in the remaining space on
+   the right — each showing `Interop: connected` and a row of colored FDC3 channel dots.
 
-5. **Join the same channel** (click the same colored dot) in both views, add a ticker to the
-   watchlist, and click its row — the OMS Order Entry view's active ticker and L2 depth should
-   update immediately via the `fdc3.instrument` context broadcast.
+5. **Join the same channel** (click the same colored dot) in all four views, add a ticker to the
+   watchlist, and click its row — `oms-order-entry`'s and `candlestick-mfe`'s active ticker should
+   update immediately via the `fdc3.instrument` broadcast. Submit an order from `oms-order-entry`
+   and it should appear in `order-blotter-mfe` via the custom `blvd.order` broadcast.
 
 If you change `frontend/interop/openfin/manifest.json`, re-copy it to
 `frontend/watchlist-mfe/public/manifest.json` (or symlink it) before relaunching, and fully close
@@ -346,8 +365,14 @@ local loopback interface.
   strategy processes that need the raw L3 feed with less latency/jitter than multicast — not yet
   built.
 - **The order ticket in `oms-order-entry` is a UI-only mock.** There is no OMS/exchange backend in
-  this system; submitting an order validates the form and appends to a local, in-memory log. There
-  is no real order routing.
+  this system; submitting an order validates the form and broadcasts it over FDC3 for
+  `order-blotter-mfe` to record. There is no real order routing, and outside a desktop container
+  (standalone browser use) a submitted order has nowhere to go and is simply dropped after a local
+  confirmation message.
+- **`candlestick-mfe`'s candles are BBO-midpoint-derived, not trade-based.** Boulevard doesn't
+  distribute individual trade prints (ITCH Order Executed messages are consumed server-side for
+  book maintenance but never forwarded to the frontend) — the chart is a reasonable, clearly-labeled
+  proxy, not a substitute for real OHLC-from-trades.
 - **FDC3 App Directory** (`frontend/interop/fdc3-app-directory.json`) is provided in the standard
   format, but only verified against OpenFin/HERE Core — it has not been validated against
   interop.io's io.Connect Desktop (a separate product, unrelated to the OpenFin→HERE rebrand,

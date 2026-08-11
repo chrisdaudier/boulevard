@@ -4,20 +4,40 @@
       "appId": "boulevard-watchlist",
       "name": "boulevard-watchlist",
       "title": "Boulevard Ticker Watchlist",
-      "description": "Live BBO for a hand-picked list of tickers. Clicking a row broadcasts fdc3.instrument context to any connected app on the same channel.",
+      "description": "Live BBO for a hand-picked list of tickers (AAPL, MSFT, NVDA, GOOG, AMZN by default). Clicking a row broadcasts fdc3.instrument context to any connected app on the same channel.",
       "type": "web",
       "details": {
-        "url": "http://localhost:5174"
+        "url": "https://localhost:5174"
       }
     },
     {
       "appId": "boulevard-oms-order-entry",
       "name": "boulevard-oms-order-entry",
       "title": "Boulevard OMS Order Entry",
-      "description": "L2 depth and a mock order ticket for whichever ticker is currently active - driven by fdc3.instrument context, or a manual ticker override for standalone use.",
+      "description": "A mock order ticket plus a combined bid/ask depth ladder for whichever ticker is currently active - driven by fdc3.instrument context, or a manual ticker override for standalone use. Submitted orders are broadcast as a custom blvd.order context for boulevard-order-blotter to record.",
       "type": "web",
       "details": {
-        "url": "http://localhost:5173"
+        "url": "https://localhost:5173"
+      }
+    },
+    {
+      "appId": "boulevard-order-blotter",
+      "name": "boulevard-order-blotter",
+      "title": "Boulevard Order Blotter",
+      "description": "Records every order broadcast by boulevard-oms-order-entry (custom blvd.order FDC3 context) on the same channel. No order state of its own beyond what it's received.",
+      "type": "web",
+      "details": {
+        "url": "https://localhost:5175"
+      }
+    },
+    {
+      "appId": "boulevard-candlestick",
+      "name": "boulevard-candlestick",
+      "title": "Boulevard Candlestick Chart",
+      "description": "A live candlestick chart for the currently active ticker, built client-side from the BBO midpoint (Boulevard doesn't distribute individual trade prints) - driven by fdc3.instrument context, or a manual ticker override for standalone use.",
+      "type": "web",
+      "details": {
+        "url": "https://localhost:5176"
       }
     }
   ]

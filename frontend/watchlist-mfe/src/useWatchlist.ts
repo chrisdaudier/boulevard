@@ -13,13 +13,19 @@ const STORAGE_KEY = "boulevard.watchlist.tickers";
 // redrawing the grid more often than the data can actually change.
 const REFRESH_INTERVAL_MS = 250;
 
+const DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOG", "AMZN"];
+
 function loadStoredTickers(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === "string") : [];
+    if (raw === null) {
+      return DEFAULT_TICKERS; // first-ever load, nothing saved yet
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === "string") : DEFAULT_TICKERS;
   } catch {
-    return [];
+    return DEFAULT_TICKERS;
   }
 }
 

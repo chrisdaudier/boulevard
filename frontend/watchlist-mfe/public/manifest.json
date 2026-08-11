@@ -18,8 +18,8 @@
     "windows": [
       {
         "name": "boulevard-main",
-        "defaultWidth": 1600,
-        "defaultHeight": 900,
+        "defaultWidth": 1800,
+        "defaultHeight": 950,
         "layout": {
           "content": [
             {
@@ -27,27 +27,65 @@
               "content": [
                 {
                   "type": "stack",
-                  "width": 35,
+                  "width": 33,
                   "content": [
                     {
                       "type": "component",
                       "componentName": "view",
                       "componentState": {
                         "name": "boulevard-watchlist",
+                        "title": "Watchlist",
                         "url": "https://localhost:5174"
                       }
                     }
                   ]
                 },
                 {
+                  "type": "column",
+                  "width": 42,
+                  "content": [
+                    {
+                      "type": "stack",
+                      "height": 55,
+                      "content": [
+                        {
+                          "type": "component",
+                          "componentName": "view",
+                          "componentState": {
+                            "name": "boulevard-candlestick",
+                            "title": "Chart",
+                            "url": "https://localhost:5176"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "stack",
+                      "height": 45,
+                      "content": [
+                        {
+                          "type": "component",
+                          "componentName": "view",
+                          "componentState": {
+                            "name": "boulevard-order-blotter",
+                            "title": "Order Blotter",
+                            "url": "https://localhost:5175"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
                   "type": "stack",
-                  "width": 65,
+                  "width": 25,
                   "content": [
                     {
                       "type": "component",
                       "componentName": "view",
                       "componentState": {
                         "name": "boulevard-oms-order-entry",
+                        "title": "Order Entry",
                         "url": "https://localhost:5173"
                       }
                     }

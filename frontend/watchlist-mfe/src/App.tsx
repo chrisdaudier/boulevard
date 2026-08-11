@@ -90,8 +90,7 @@ function App() {
         color: "#e0e0e0",
       }}
     >
-      <h2 style={{ margin: "0 0 8px" }}>Boulevard Ticker Watchlist</h2>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <input
           ref={inputRef}
           placeholder="Add ticker (e.g. AAPL)"
@@ -101,7 +100,9 @@ function App() {
         <button onClick={handleAdd} style={{ cursor: "pointer" }}>
           Add
         </button>
-        <p style={{ margin: "4px 0 0 12px", fontFamily: "monospace" }}>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <p style={{ margin: 0, fontFamily: "monospace" }}>
           Solace status: <strong>{status}</strong> &nbsp;|&nbsp; Watching: <strong>{rows.length}</strong> &nbsp;|&nbsp; Interop:{" "}
           <strong>{connected ? "connected" : "standalone"}</strong>
         </p>
