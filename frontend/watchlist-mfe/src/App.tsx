@@ -95,24 +95,24 @@ function App() {
           ref={inputRef}
           placeholder="Add ticker (e.g. AAPL)"
           onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-          style={{ padding: "4px 8px", fontFamily: "monospace", textTransform: "uppercase" }}
+          style={{ flex: 1, padding: "4px 8px", fontFamily: "monospace", textTransform: "uppercase" }}
         />
         <button onClick={handleAdd} style={{ cursor: "pointer" }}>
           Add
         </button>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-        <p style={{ margin: 0, fontFamily: "monospace" }}>
+        <p style={{ margin: 0, fontFamily: "monospace", fontSize: 10 }}>
           Solace status: <strong>{status}</strong> &nbsp;|&nbsp; Watching: <strong>{rows.length}</strong> &nbsp;|&nbsp; Interop:{" "}
           <strong>{connected ? "connected" : "standalone"}</strong>
         </p>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "none" }}>
           <ChannelSelector channels={channels} currentChannelId={currentChannelId} onSelect={selectChannel} />
         </div>
       </div>
-      <p style={{ margin: "0 0 8px", color: "#888", fontSize: 12 }}>
+      {/* <p style={{ margin: "0 0 8px", color: "#888", fontSize: 12 }}>
         Click a row to broadcast that ticker to other connected MFEs (e.g. OMS Order Entry).
-      </p>
+      </p> */}
       <div style={{ flex: 1 }}>
         {rows.length === 0 ? (
           <p style={{ color: "#888" }}>No tickers yet - add one above to start watching its BBO.</p>

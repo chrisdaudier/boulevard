@@ -48,10 +48,10 @@ function App() {
       }}
     >
       <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
-        <p style={{ margin: 0, fontFamily: "monospace" }}>
+        <p style={{ margin: 0, fontFamily: "monospace", fontSize: 10 }}>
           Interop: <strong>{connected ? "connected" : "standalone"}</strong> &nbsp;|&nbsp; Orders: <strong>{orders.length}</strong>
         </p>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "none" }}>
           <ChannelSelector channels={channels} currentChannelId={currentChannelId} onSelect={selectChannel} />
         </div>
       </div>

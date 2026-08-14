@@ -11,6 +11,12 @@ const TOPIC_PREFIX = "md/l2/nasdaq/";
 // Matches the backend's own publish cadence (Edge.MarketData sweeps every 250ms).
 const REFRESH_INTERVAL_MS = 250;
 
+// See useWatchlist.ts for why this exists: every MFE polls on the same 250ms cadence, and without
+// a fixed phase offset their independent timers drift into firing at the same instant, spiking
+// every open view's render work simultaneously. 125ms (half the period) keeps this app maximally
+// out-of-phase with watchlist-mfe's offset-0 timer regardless of drift.
+const REFRESH_PHASE_OFFSET_MS = 125;
+
 function toDepthRows(snapshot: L2Snapshot | null): DepthRow[] {
   if (!snapshot) {
     return [];
@@ -58,12 +64,16 @@ export function useActiveSymbolFeed(ticker: string | null) {
     connectionRef.current = connection;
     connection.setTickers(tickerRef.current ? [tickerRef.current] : []);
 
-    const interval = setInterval(() => {
-      setRows(toDepthRows(snapshotRef.current));
-      setSnapshot(snapshotRef.current);
-    }, REFRESH_INTERVAL_MS);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const startTimer = setTimeout(() => {
+      interval = setInterval(() => {
+        setRows(toDepthRows(snapshotRef.current));
+        setSnapshot(snapshotRef.current);
+      }, REFRESH_INTERVAL_MS);
+    }, REFRESH_PHASE_OFFSET_MS);
 
     return () => {
+      clearTimeout(startTimer);
       clearInterval(interval);
       connection.disconnect();
       connectionRef.current = null;

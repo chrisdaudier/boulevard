@@ -24,8 +24,19 @@ export function useFdc3Channels() {
 
         setChannels(userChannels);
         const current = await fdc3.getCurrentChannel();
-        if (!cancelled) {
-          setCurrentChannelId(current?.id ?? null);
+        if (cancelled) {
+          return;
+        }
+
+        if (current) {
+          setCurrentChannelId(current.id);
+        } else if (userChannels.length > 0) {
+          // Default every MFE onto the first user channel so they're interoperable out of the
+          // box - no manual "click the same dot in every view" step needed on a fresh launch.
+          await fdc3.joinUserChannel(userChannels[0].id);
+          if (!cancelled) {
+            setCurrentChannelId(userChannels[0].id);
+          }
         }
       })
       .catch(() => {

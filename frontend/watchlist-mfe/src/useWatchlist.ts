@@ -7,13 +7,49 @@ const SOLACE_VPN = "default";
 const SOLACE_USERNAME = "default";
 const SOLACE_PASSWORD = "";
 const TOPIC_PREFIX = "md/l2/nasdaq/";
-const STORAGE_KEY = "boulevard.watchlist.tickers";
+// Bumped to v2 when the default list changed from 5 hand-picked tickers to the real top 20 -
+// anyone with an old saved list under the v1 key gets the new default instead of silently keeping
+// stale data that no longer matches what the default is supposed to be.
+const STORAGE_KEY = "boulevard.watchlist.tickers.v2";
 
 // Matches the backend's own publish cadence (Edge.MarketData sweeps every 250ms) - no point
 // redrawing the grid more often than the data can actually change.
 const REFRESH_INTERVAL_MS = 250;
 
-const DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOG", "AMZN"];
+// Every MFE polls on the same 250ms cadence, but with no coordination between them their
+// independent setInterval timers drift and periodically land within a few ms of each other -
+// when that happens, every open view's renderer process wants to re-render at the same instant,
+// spiking CPU demand across all of them simultaneously instead of spreading it out. A fixed phase
+// offset (distinct per app) keeps this view's tick roughly out-of-phase with the others regardless
+// of drift, so simultaneous-MFE rendering load stays spread across the 250ms window rather than
+// clustering. This app fires on-cadence (offset 0); see useActiveSymbolFeed.ts for its counterpart.
+const REFRESH_PHASE_OFFSET_MS = 0;
+
+// The 20 most active tickers (by total ITCH message count) across the six pcap files the demo
+// publisher actually replays (T133000-T142000, i.e. --minutes 60 from the market-open capture) -
+// measured directly from the capture data, not guessed. Most-active first.
+const DEFAULT_TICKERS = [
+  "SPY",
+  "QQQ",
+  "TSLA",
+  "GOOG",
+  "GOOGL",
+  "AAPL",
+  "NVDA",
+  "IWM",
+  "IVV",
+  "TQQQ",
+  "VOO",
+  "AMD",
+  "AMZN",
+  "SMH",
+  "SPXL",
+  "XLY",
+  "MSFT",
+  "SOXL",
+  "XLK",
+  "DIA",
+];
 
 function loadStoredTickers(): string[] {
   try {
@@ -62,11 +98,15 @@ export function useWatchlist() {
     connectionRef.current = connection;
     connection.setTickers(tickersRef.current);
 
-    const interval = setInterval(() => {
-      setRows(tickersRef.current.map((ticker) => toRow(ticker, snapshotsRef.current.get(ticker))));
-    }, REFRESH_INTERVAL_MS);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const startTimer = setTimeout(() => {
+      interval = setInterval(() => {
+        setRows(tickersRef.current.map((ticker) => toRow(ticker, snapshotsRef.current.get(ticker))));
+      }, REFRESH_INTERVAL_MS);
+    }, REFRESH_PHASE_OFFSET_MS);
 
     return () => {
+      clearTimeout(startTimer);
       clearInterval(interval);
       connection.disconnect();
       connectionRef.current = null;

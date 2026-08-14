@@ -10,6 +10,16 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!--
+      This is a long-running, sustained-throughput background service, not a client/UI app - the
+      default Workstation GC (tuned for infrequent small pauses on a UI thread) collects more
+      often under continuous allocation pressure than Server GC's larger per-core heaps do. Server
+      GC is the standard choice for exactly this workload shape (it's what ASP.NET Core defaults
+      to for the same reason). Background (concurrent) mode keeps most collection work off the
+      threads doing real work.
+    -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
 </Project>

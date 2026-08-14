@@ -39,17 +39,17 @@ function App() {
           ref={inputRef}
           placeholder="Load ticker (e.g. AAPL)"
           onKeyDown={(e) => e.key === "Enter" && handleLoad()}
-          style={{ padding: "4px 8px", fontFamily: "monospace", textTransform: "uppercase" }}
+          style={{ flex: 1, padding: "4px 8px", fontFamily: "monospace", textTransform: "uppercase" }}
         />
-        <button onClick={handleLoad} style={{ cursor: "pointer" }}>
+        <button onClick={handleLoad} style={{ cursor: "pointer", height: 28 }}>
           Load
         </button>
-        <p style={{ margin: 0, fontFamily: "monospace", fontSize: 13 }}>
+        <p style={{ margin: 0, fontFamily: "monospace", fontSize: 10 }}>
           Active: <strong>{ticker ?? "-"}</strong>
           {source && <span style={{ color: "#888" }}> ({source})</span>} &nbsp;|&nbsp; Solace: <strong>{status}</strong>{" "}
           &nbsp;|&nbsp; Interop: <strong>{connected ? "connected" : "standalone"}</strong>
         </p>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "none" }}>
           <ChannelSelector channels={channels} currentChannelId={currentChannelId} onSelect={selectChannel} />
         </div>
       </div>

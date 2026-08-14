@@ -173,8 +173,7 @@ export function OrderTicketPanel({ ticker, snapshot }: OrderTicketPanelProps) {
         {lastSubmitted && (
           <p style={{ color: "#888", fontSize: 12, margin: 0 }}>
             Last order: {lastSubmitted.entry.ticker} {lastSubmitted.entry.side} {lastSubmitted.entry.quantity.toLocaleString()}{" "}
-            {lastSubmitted.entry.price != null ? `@ ${lastSubmitted.entry.price.toFixed(4)}` : "MKT"} -{" "}
-            {lastSubmitted.broadcast ? "sent to Order Blotter" : "accepted locally (no interop connection)"}
+            {lastSubmitted.entry.price != null ? `@ ${lastSubmitted.entry.price.toFixed(4)}` : "MKT"} 
           </p>
         )}
       </div>

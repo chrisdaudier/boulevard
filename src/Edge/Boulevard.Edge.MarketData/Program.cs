@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
@@ -93,9 +94,20 @@ var books = new Dictionary<ushort, OrderBook>();
 var tickerByLocate = new Dictionary<ushort, string>();
 var messageCountByLocate = new Dictionary<ushort, long>();
 
-// Sized to comfortably exceed the ~464K Add/Execute/Cancel messages this capture produces,
-// so recording a latency sample never triggers a reallocation on the hot path.
-var latencySamplesUs = new List<long>(1_000_000);
+// Fixed-size ring buffer holding the most recent latency samples - a percentile computed over a
+// rolling window of the last N messages is exactly as useful for "is the pipeline staying fast"
+// as one computed over the full history. An unbounded List<long> here (the original design, sized
+// for a single ~464K-message run) grows forever across a long-running --loop demo: after a few
+// hours it reached tens of millions of entries, and ComputeLatencyPercentiles()'s periodic
+// ToArray() + Array.Sort() over that list turned into a many-hundred-MB allocation and a
+// multi-billion-comparison sort on every report tick - exactly the kind of work that triggers a
+// multi-second stop-the-world GC pause, which froze the entire pipeline (and every downstream
+// MFE) for a second or more at a time. Capacity is fixed, so memory and report-tick cost never
+// grow no matter how long the process runs.
+const int LatencySampleCapacity = 100_000;
+var latencySamplesUs = new long[LatencySampleCapacity];
+int latencySampleCount = 0;
+int latencySampleWriteIndex = 0;
 
 // Zero-allocation handoff from the socket thread to the worker thread. Behind an interface
 // so a future hand-rolled SPSC ring buffer can replace this without touching either thread's
@@ -133,6 +145,28 @@ Console.WriteLine("[EDGE] Waiting for datagrams. Press CTRL+C to exit.\n");
 const int L2PublishPort = 5001;
 const int L2DepthLevels = 10;
 const int L2TrackedSymbolCount = 200;
+
+// Reusable buffer for PublishL2Snapshots' periodic top-N ranking - a LINQ Where/OrderByDescending
+// chain there previously re-allocated its iterator wrappers and an internal sort buffer on every
+// single 250ms tick, forever, while holding bookLock. Sorting into this instead reuses the same
+// backing array call after call (List<T>.Clear() doesn't release it), which is a steady 4-times-a-
+// second allocation source removed for the life of the process.
+var rankingBuffer = new List<KeyValuePair<ushort, long>>(L2TrackedSymbolCount * 8);
+
+// Same rationale, for PrintSnapshot's once-a-second "busiest BBOs" console summary.
+var busiestBuffer = new List<(ushort StockLocate, Bbo Bbo)>(1024);
+
+// Reused for JSON-serializing each L2 snapshot below - JsonSerializer.SerializeToUtf8Bytes
+// allocates a fresh byte[] (and the writer's own internal growth buffer) per call; at up to 200
+// symbols every 250ms that's up to 800 allocations/second, forever. Utf8JsonWriter.Reset()
+// rebinds to the buffer without reallocating either the writer or (once grown to a steady-state
+// size) the buffer itself.
+var l2JsonBuffer = new ArrayBufferWriter<byte>(1024);
+var l2JsonWriter = new Utf8JsonWriter(l2JsonBuffer);
+
+// Reused across ticks instead of `new List<>(...)` every 250ms forever - same rationale as
+// rankingBuffer/busiestBuffer above.
+var snapshots = new List<L2SnapshotDto>(L2TrackedSymbolCount);
 
 // Recency weighting for the "most active" ranking: a plain lifetime-cumulative count would let
 // a ticker that was only active in an initial burst (e.g. the opening auction) permanently
@@ -630,7 +664,14 @@ void RecordLatency(OrderBook book, long receiveTimestamp)
 {
     book.GetBbo();
     long elapsedTicks = Stopwatch.GetTimestamp() - receiveTimestamp;
-    latencySamplesUs.Add(elapsedTicks * 1_000_000L / Stopwatch.Frequency);
+    long elapsedUs = elapsedTicks * 1_000_000L / Stopwatch.Frequency;
+
+    latencySamplesUs[latencySampleWriteIndex] = elapsedUs;
+    latencySampleWriteIndex = (latencySampleWriteIndex + 1) % LatencySampleCapacity;
+    if (latencySampleCount < LatencySampleCapacity)
+    {
+        latencySampleCount++;
+    }
 }
 
 // Publishes a full L2 snapshot (not a delta) for the most active resolved-ticker symbols to the
@@ -638,7 +679,7 @@ void RecordLatency(OrderBook book, long receiveTimestamp)
 // 250ms timer, entirely outside the mutation path above.
 void PublishL2Snapshots()
 {
-    List<L2SnapshotDto> snapshots;
+    snapshots.Clear();
 
     lock (bookLock)
     {
@@ -647,18 +688,27 @@ void PublishL2Snapshots()
         // Ranked by overall message activity, but only among symbols that actually have book
         // state - messageCountByLocate also includes message types (Stock Directory, Order
         // Delete, etc.) that never populate `books`, so ranking without this filter could pick
-        // 200 symbols with plenty of *messages* but nothing to actually publish.
-        var mostActive = messageCountByLocate
-            .Where(kv => tickerByLocate.ContainsKey(kv.Key) && books.ContainsKey(kv.Key))
-            .OrderByDescending(kv => kv.Value)
-            .Take(L2TrackedSymbolCount);
+        // 200 symbols with plenty of *messages* but nothing to actually publish. Built into a
+        // reused buffer + in-place sort rather than a LINQ Where/OrderByDescending/Take chain -
+        // see rankingBuffer's declaration for why.
+        rankingBuffer.Clear();
+        foreach (KeyValuePair<ushort, long> kv in messageCountByLocate)
+        {
+            if (tickerByLocate.ContainsKey(kv.Key) && books.ContainsKey(kv.Key))
+            {
+                rankingBuffer.Add(kv);
+            }
+        }
+
+        rankingBuffer.Sort(static (a, b) => b.Value.CompareTo(a.Value));
+        int takeCount = Math.Min(L2TrackedSymbolCount, rankingBuffer.Count);
 
         DateTime now = DateTime.UtcNow;
-        snapshots = new List<L2SnapshotDto>(L2TrackedSymbolCount);
 
-        foreach (KeyValuePair<ushort, long> entry in mostActive)
+        for (int i = 0; i < takeCount; i++)
         {
-            if (!books.TryGetValue(entry.Key, out OrderBook book))
+            ushort locate = rankingBuffer[i].Key;
+            if (!books.TryGetValue(locate, out OrderBook book))
             {
                 continue;
             }
@@ -667,7 +717,7 @@ void PublishL2Snapshots()
             // resulting DTOs hold no references into live book state, so it's safe to serialize
             // and send them after releasing bookLock below.
             snapshots.Add(new L2SnapshotDto(
-                tickerByLocate[entry.Key],
+                tickerByLocate[locate],
                 now,
                 ToDtoLevels(book.GetBidDepth()),
                 ToDtoLevels(book.GetAskDepth())));
@@ -681,11 +731,13 @@ void PublishL2Snapshots()
     // them).
     foreach (L2SnapshotDto snapshot in snapshots)
     {
-        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(snapshot);
+        l2JsonBuffer.Clear();
+        l2JsonWriter.Reset();
+        JsonSerializer.Serialize(l2JsonWriter, snapshot);
 
         try
         {
-            l2PublishSocket.SendTo(payload, l2PublishEndpoint);
+            l2PublishSocket.SendTo(l2JsonBuffer.WrittenSpan, l2PublishEndpoint);
         }
         catch (SocketException)
         {
@@ -712,12 +764,15 @@ static PriceLevelDto[] ToDtoLevels(ReadOnlySpan<PriceLevel> levels)
     long[] samples;
     lock (bookLock)
     {
-        if (latencySamplesUs.Count == 0)
+        if (latencySampleCount == 0)
         {
             return (0, 0, 0);
         }
 
-        samples = latencySamplesUs.ToArray();
+        // Bounded copy (at most LatencySampleCapacity elements) - cheap regardless of how long
+        // the process has been running, unlike copying an ever-growing List<long>.
+        samples = new long[latencySampleCount];
+        Array.Copy(latencySamplesUs, samples, latencySampleCount);
     }
 
     Array.Sort(samples);
@@ -755,7 +810,7 @@ void PrintSnapshot(bool live)
     }
 
     (long p50, long p99, long max) = ComputeLatencyPercentiles();
-    Console.WriteLine($" -> Socket->BBO latency (us): p50={p50:N0} p99={p99:N0} max={max:N0} (n={latencySamplesUs.Count:N0})");
+    Console.WriteLine($" -> Socket->BBO latency (us): p50={p50:N0} p99={p99:N0} max={max:N0} (n={latencySampleCount:N0} of last {LatencySampleCapacity:N0})");
     Console.WriteLine($" -> Reorder buffered: {pendingCount:N0} (awaiting resequencing)");
 
     lock (bookLock)
@@ -764,13 +819,18 @@ void PrintSnapshot(bool live)
         Console.WriteLine($" -> Resolved tickers: {tickerByLocate.Count:N0} (L2 published for top {Math.Min(L2TrackedSymbolCount, tickerByLocate.Count):N0})");
         Console.WriteLine(" -> Busiest BBOs:");
 
-        var busiestFirst = books
-            .Select(kv => (StockLocate: kv.Key, Bbo: kv.Value.GetBbo()))
-            .OrderByDescending(x => x.Bbo.BidShares + x.Bbo.AskShares)
-            .Take(5);
-
-        foreach ((ushort stockLocate, Bbo bbo) in busiestFirst)
+        busiestBuffer.Clear();
+        foreach (KeyValuePair<ushort, OrderBook> kv in books)
         {
+            busiestBuffer.Add((kv.Key, kv.Value.GetBbo()));
+        }
+
+        busiestBuffer.Sort(static (a, b) => (b.Bbo.BidShares + b.Bbo.AskShares).CompareTo(a.Bbo.BidShares + a.Bbo.AskShares));
+        int busiestCount = Math.Min(5, busiestBuffer.Count);
+
+        for (int i = 0; i < busiestCount; i++)
+        {
+            (ushort stockLocate, Bbo bbo) = busiestBuffer[i];
             string bid = bbo.BidPriceInTicks.HasValue ? $"${bbo.BidPriceInTicks.Value / 10000.0m:F4} x {bbo.BidShares:N0}" : "-";
             string ask = bbo.AskPriceInTicks.HasValue ? $"${bbo.AskPriceInTicks.Value / 10000.0m:F4} x {bbo.AskShares:N0}" : "-";
             Console.WriteLine($"    Locate {stockLocate,6}: BID {bid,-20} ASK {ask}");
@@ -780,6 +840,11 @@ void PrintSnapshot(bool live)
     Console.WriteLine();
 }
 
-record PriceLevelDto(decimal Price, long Shares);
+// Value types, not the default reference-type record - at up to 200 symbols x 10 depth levels x
+// 2 sides every 250ms, a reference-type PriceLevelDto would be up to 4,000 individually
+// heap-allocated objects per tick (16,000/second) just to hold two numbers each. As a struct they
+// live inline in the PriceLevelDto[] arrays instead, and L2SnapshotDto avoids one more allocation
+// per symbol per tick (200/tick, 800/second) the same way.
+record struct PriceLevelDto(decimal Price, long Shares);
 
-record L2SnapshotDto(string Ticker, DateTime TimestampUtc, PriceLevelDto[] Bids, PriceLevelDto[] Asks);
+record struct L2SnapshotDto(string Ticker, DateTime TimestampUtc, PriceLevelDto[] Bids, PriceLevelDto[] Asks);

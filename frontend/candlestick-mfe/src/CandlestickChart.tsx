@@ -6,14 +6,26 @@ interface CandlestickChartProps {
   candles: Candle[];
 }
 
+function toChartCandle(candle: Candle) {
+  return { ...candle, time: candle.time as UTCTimestamp };
+}
+
 /**
  * Thin imperative wrapper around lightweight-charts - the library owns its own canvas rendering,
- * so this pushes data into it via setData() rather than letting React re-render the chart itself.
+ * so this pushes data into it directly rather than letting React re-render the chart itself.
+ *
+ * setData() replaces and redraws the *entire* dataset - calling it on every tick (up to 4/second,
+ * against a growing up-to-500-candle history) was a real, avoidable rendering cost repeated
+ * forever. update() is what lightweight-charts is actually designed for here: it appends a new
+ * bar, or patches the existing last bar in place if its `time` is unchanged (exactly the "same
+ * bucket, price moved" case from useCandles) - full setData() is only needed once, when the
+ * dataset is reset for a new ticker/interval.
  */
 export function CandlestickChart({ candles }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const previousLengthRef = useRef(0);
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -46,8 +58,22 @@ export function CandlestickChart({ candles }: CandlestickChartProps) {
   }, []);
 
   useEffect(() => {
-    // lightweight-charts requires strictly ascending, non-duplicate `time` values.
-    seriesRef.current?.setData(candles.map((c) => ({ ...c, time: c.time as UTCTimestamp })));
+    const series = seriesRef.current;
+    if (!series) {
+      return;
+    }
+
+    if (candles.length === 0) {
+      series.setData([]);
+    } else if (candles.length < previousLengthRef.current) {
+      // A reset (ticker/interval change) always passes through 0 first (see useCandles), so this
+      // is just a defensive fallback, not the expected path.
+      series.setData(candles.map(toChartCandle));
+    } else {
+      series.update(toChartCandle(candles[candles.length - 1]));
+    }
+
+    previousLengthRef.current = candles.length;
   }, [candles]);
 
   return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
