@@ -3,7 +3,12 @@
   <Project Path="src/Core/Boulevard.MarketData.Engine/Boulevard.MarketData.Engine.csproj" />
   <Project Path="src/Core/Boulevard.MarketData.Engine.Benchmarks/Boulevard.MarketData.Engine.Benchmarks.csproj" />
   <Project Path="src/Protocols/Boulevard.Protocol.Itch/Boulevard.Protocol.Itch.csproj" />
+  <Project Path="src/Protocols/Boulevard.Protocol.Fix/Boulevard.Protocol.Fix.csproj" />
+  <Project Path="src/Protocols/Boulevard.Protocol.Fix.Tests/Boulevard.Protocol.Fix.Tests.csproj" />
   <Project Path="src/Simulators/Boulevard.Simulators.Nasdaq/Boulevard.Simulators.Nasdaq.csproj" />
   <Project Path="src/Edge/Boulevard.Edge.MarketData/Boulevard.Edge.MarketData.csproj" />
   <Project Path="src/Edge/Boulevard.Edge.SolaceGateway/Boulevard.Edge.SolaceGateway.csproj" />
+  <Project Path="src/Core/Boulevard.Risk.Engine/Boulevard.Risk.Engine.csproj" />
+  <Project Path="src/Core/Boulevard.Risk.Engine.Tests/Boulevard.Risk.Engine.Tests.csproj" />
+  <Project Path="src/Core/Boulevard.Risk.Engine.Benchmarks/Boulevard.Risk.Engine.Benchmarks.csproj" />
 </Solution>
